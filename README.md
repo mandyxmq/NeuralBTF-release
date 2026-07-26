@@ -33,9 +33,9 @@ pip install -e .        # optional: makes `import neuralbtf` work outside the ch
 ```
 
 Dependencies are **torch, numpy and h5py**. matplotlib is optional (`--plot`), as is
-`lpips` (`evaluate.py --lpips`). No tiny-cuda-nn, no CUDA compiler, no renderer: the
-spherical-harmonics encoding and the EXR writer that the original code got from
-`tinycudann` and `mitsuba` are implemented here in ~100 lines each.
+`lpips` (`evaluate.py --lpips`). No CUDA compiler and no renderer are needed: the
+spherical-harmonics encoding and the EXR and PNG writers are implemented here, in
+about a hundred lines each.
 
 Verify the install (runs on CPU in a few seconds):
 
@@ -189,8 +189,8 @@ ground truth, prediction and a brightened `|difference|` as sRGB PNGs; `--save_e
 writes the same images as linear HDR.
 
 The model architecture comes from the `*_model_config.json` written during training,
-or, if there is none, is inferred from the checkpoint's tensor shapes — so
-checkpoints produced by the original tiny-cuda-nn scripts can be scored as well.
+or, if there is none, is inferred from the checkpoint's tensor shapes — so a bare
+`state_dict` can be scored as well.
 
 The batch driver evaluates every material against the crops in the table and collects
 the results into one table:
@@ -254,42 +254,3 @@ rgb = model(x)
 
 Textures train at `--texture_lr_scale` (default 10×) the decoder's learning rate.
 Training uses mixed precision by default (`--no_amp` to disable).
-
-## Notes for anyone comparing against the original scripts
-
-This is a cleaned extraction of `samples/BTF_pytorch_512.py` + `samples/util.py` from
-the tiny-cuda-nn working tree. Behaviour is preserved; the differences worth knowing:
-
-- **Parameter names are unchanged**, so old checkpoints load with `strict=True`.
-- **The SH encoding matches tiny-cuda-nn's**, including its convention of remapping
-  its input from `[0,1]` to `[-1,1]` (see `neuralbtf/encodings.py`). The reference
-  code fed raw direction vectors to it, so the model is trained on SH evaluated at
-  `2d - 1`; that is reproduced exactly.
-- **Data is read as a window** (`[:train_len, y0:y1, x0:x1]`) instead of loading the
-  whole file and cropping afterwards. Same values, no 25–90 GB allocation.
-- **Directions are expanded on the GPU** per step instead of being pre-tiled to
-  `(N, ynum, xnum, 4)` in host memory. Same pairing of uv samples and directions.
-- **Ground-truth EXRs are the exact crop.** The original resampled them through a
-  half-pixel-shifted bilinear lookup before writing.
-- **Validation is a pixel-weighted mean** over all held-out pixels; the original
-  averaged per-chunk means, which differs only in the last partial chunk.
-- **Training only ever looks at the validation half** of the held-out file. The
-  original monitored the whole file during training and split it into val/test halves
-  later, in the evaluation scripts; the halves and their order are unchanged.
-- **Checkpoints during training are rolled into `_latest.pth`** instead of one file
-  per interval; the final `_iter_<n_steps>.pth` is unchanged.
-- **`evaluate.py` reproduces `evaluate_512_updated.py`**: the same metrics on the same
-  crop, split and pixel-centre grid, with negative radiance clamped away first. LPIPS
-  is optional rather than required, the PNGs are written without Mitsuba (and without
-  its "divide by max/5 if the image is entirely above 1" rescaling), and the metrics
-  land in JSON/NPZ instead of pickles.
-- **Checkpoints from the original scripts load.** They carry an empty
-  `dir_encoder.params` — tiny-cuda-nn registers a parameter for the SH encoding even
-  though it has nothing to learn. It is dropped; everything with weights in it is
-  still matched strictly.
-- **Loss mode 3 is now the same expression for training and validation** (the
-  original used different formulas for each). All published results use mode 0.
-- Dropped: the unused hash-grid/transformer/frequency-encoding model variants, the
-  tiny-cuda-nn `FullyFusedMLP` path (results used `--use_torch_mlp`), `--overfit`,
-  `--downsample_factor`, `--data2`, and the hash-grid arguments, which this model
-  never reads.
