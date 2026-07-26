@@ -254,3 +254,9 @@ rgb = model(x)
 
 Textures train at `--texture_lr_scale` (default 10×) the decoder's learning rate.
 Training uses mixed precision by default (`--no_amp` to disable).
+
+## Contact
+
+Questions are welcome — please contact **Mandy Xia**
+([mandyxmq@gmail.com](mailto:mandyxmq@gmail.com)) or **Yuzhen Zhang**
+([adam.zhang.yz2332@yale.edu](mailto:adam.zhang.yz2332@yale.edu)).
