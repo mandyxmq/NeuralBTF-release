@@ -1,0 +1,133 @@
+{
+  "output_dir": "",
+  "device": "auto",
+  "extract": {
+    "height": null,
+    "width": null,
+    "preview": {
+      "enabled": true,
+      "light_xy": [0.48712474, 0.14440002],
+      "view_xy": [-0.6001169, 0.1504723],
+      "chunk_size": 262144,
+      "save_exr": false
+    }
+  },
+  "diffusion": {
+    "seed": 0,
+    "data": {
+      "crop_size": 320,
+      "samples_per_epoch": 12000,
+      "validation_samples": 600,
+      "batch_size": 6,
+      "zoom_range": [1.0, 4.0],
+      "extremes_probability": 0.3,
+      "workers": 4
+    },
+    "schedule": {
+      "train_timesteps": 1000,
+      "beta_schedule": "squaredcos_cap_v2",
+      "prediction_type": "v_prediction",
+      "clip_sample": false,
+      "set_alpha_to_one": false,
+      "steps_offset": 1
+    },
+    "model": {
+      "base_channels": 128,
+      "channel_multipliers": [1, 2, 2, 4],
+      "layers_per_block": 2,
+      "norm_groups": 8,
+      "attention": false,
+      "attention_head_dim": 32,
+      "attention_last_only": false
+    },
+    "train": {
+      "epochs": 3,
+      "max_steps": null,
+      "learning_rate": 0.00008,
+      "weight_decay": 0.01,
+      "min_snr_gamma": 1.0,
+      "ema_decay": 0.999,
+      "gradient_clip": 1.0,
+      "print_every": 100
+    },
+    "preview": {
+      "enabled": true,
+      "every_epochs": 1,
+      "size": 512,
+      "sampling_steps": 50,
+      "seed": 0,
+      "eta": 0.0,
+      "roll_during_sampling": true,
+      "save_offset": true
+    }
+  },
+  "wang_tiles": {
+    "seed": 0,
+    "periodicity": {
+      "enabled": true,
+      "prominence_ratio": 0.1,
+      "minimum_peak_distance": 20
+    },
+    "tile": {
+      "mode": "auto",
+      "target_size": null,
+      "target_size_ratio": 0.75,
+      "fallback_size": 1024,
+      "divisor": 8,
+      "enforce_square": false,
+      "height": null,
+      "width": null
+    },
+    "search": {
+      "iterations": 200,
+      "pixel_appearance": 1.0,
+      "pixel_offset": 3.0,
+      "seam_appearance": 1.0,
+      "seam_offset": 3.0
+    },
+    "visualization": {
+      "enabled": true,
+      "preview_size": 320,
+      "save_offset": true,
+      "save_exr": false
+    }
+  },
+  "repaint": {
+    "seed": 0,
+    "mask": {
+      "core_width": 32,
+      "taper_power": 0.3,
+      "flat_ratio": 0.8
+    },
+    "process": {
+      "steps": 50,
+      "jump": 5,
+      "repeats": 2,
+      "coarse_zoom": 4.0,
+      "fine_zoom": 1.0,
+      "fine_strength": 0.65,
+      "feather": 8,
+      "precision": "auto",
+      "preview_tile": 0
+    },
+    "visualization": {
+      "enabled": true,
+      "preview_size": 512,
+      "save_offset": true,
+      "save_exr": false
+    }
+  },
+  "tiling": {
+    "source": "repaint",
+    "rows": 4,
+    "columns": 4,
+    "seed": 20,
+    "periodic": true,
+    "visualization": {
+      "enabled": true,
+      "preview_size": 2048,
+      "save_offset": true,
+      "save_exr": false
+    }
+  }
+}
