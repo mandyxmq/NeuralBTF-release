@@ -1,0 +1,24 @@
+{
+  "network": {
+    "otype": "FullyFusedMLP",
+    "activation": "ReLU",
+    "output_activation": "None",
+    "n_neurons": 512,
+    "n_hidden_layers": 3
+  },
+  "encoding": {
+    "otype": "Composite",
+    "nested": [
+      {
+        "n_dims_to_encode": 3,
+        "otype": "SphericalHarmonics",
+        "degree": 3
+      },
+      {
+        "n_dims_to_encode": 3,
+        "otype": "SphericalHarmonics",
+        "degree": 3
+      }
+    ]
+  }
+}

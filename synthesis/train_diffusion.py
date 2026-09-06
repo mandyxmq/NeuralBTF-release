@@ -1,0 +1,395 @@
+#!/usr/bin/env python3
+"""Train a per-material, zoom-conditioned diffusion prior over extracted latents."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import random
+import sys
+import time
+from pathlib import Path
+from typing import Optional
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+sys.path.insert(0, str(ROOT))
+
+from neuralbtf import write_png  # noqa: E402
+from neuralbtf.synthesis import render_latent_stack  # noqa: E402
+from neuralbtf.synthesis.artifacts import (load_latent_artifact,  # noqa: E402
+                                           load_source_model,
+                                           prepare_stage,
+                                           preview_directions,
+                                           source_uv_scale,
+                                           write_json)
+from neuralbtf.synthesis.config import (load_synthesis_config,  # noqa: E402
+                                        resolve_device, resolve_output_root,
+                                        synthesis_stage_paths)
+from neuralbtf.synthesis.diffusion import (ExponentialMovingAverage,  # noqa: E402
+                                           LatentCropDataset,
+                                           build_training_scheduler,
+                                           build_unet, cuda_memory,
+                                           cuda_memory_stats, evaluate,
+                                           format_duration, sample,
+                                           save_checkpoint, train_epoch)
+
+
+def _save_loss_plot(history: dict, path: Path) -> None:
+    steps = history["step_loss"]
+    fig, axis = plt.subplots(figsize=(9, 5))
+    axis.plot(np.arange(1, len(steps) + 1), steps, alpha=0.25, label="step")
+    if len(steps) >= 50:
+        window = 50
+        smooth = np.convolve(steps, np.ones(window) / window, mode="valid")
+        axis.plot(
+            np.arange(window, len(steps) + 1),
+            smooth,
+            linewidth=1.5,
+            label=f"moving average ({window})",
+        )
+    axis.set_xlabel("Optimization step")
+    axis.set_ylabel("Min-SNR weighted MSE")
+    axis.grid(alpha=0.25)
+    axis.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
+def _restore_state(model: torch.nn.Module, state: dict) -> None:
+    model.load_state_dict(state, strict=True)
+
+
+def _preview_epoch(
+    *,
+    epoch: int,
+    model: torch.nn.Module,
+    ema: ExponentialMovingAverage,
+    config,
+    artifact,
+    mean: np.ndarray,
+    std: np.ndarray,
+    device: torch.device,
+    output_dir: Path,
+) -> None:
+    raw_state = {
+        name: value.detach().cpu().clone()
+        for name, value in model.state_dict().items()
+    }
+    ema.copy_to(model)
+    generated = []
+    for zoom in config.diffusion.data.zoom_range:
+        print(f"  preview diffusion sample: zoom={zoom:g}")
+        normalized = sample(
+            model,
+            config.diffusion.schedule,
+            latent_channels=artifact.layout.total_channels,
+            height=config.diffusion.preview.size,
+            width=config.diffusion.preview.size,
+            zoom=zoom,
+            steps=config.diffusion.preview.sampling_steps,
+            seed=config.diffusion.preview.seed + epoch * 101 + int(round(zoom * 10)),
+            eta=config.diffusion.preview.eta,
+            roll_during_sampling=config.diffusion.preview.roll_during_sampling,
+            device=device,
+        )
+        latent = normalized[0].permute(1, 2, 0).float().cpu().numpy()
+        latent = latent * std.reshape(1, 1, -1) + mean.reshape(1, 1, -1)
+        generated.append((float(zoom), latent))
+    _restore_state(model, raw_state)
+
+    source_model = load_source_model(artifact, device)
+    light_xy, view_xy = preview_directions(artifact)
+    for zoom, latent in generated:
+        scale = source_uv_scale(
+            artifact,
+            domain_height=int(round(latent.shape[0] * zoom)),
+            domain_width=int(round(latent.shape[1] * zoom)),
+        )
+        rendered = render_latent_stack(
+            source_model,
+            latent,
+            artifact.layout,
+            light_xy=light_xy,
+            view_xy=view_xy,
+            uv_scale=scale,
+            device=device,
+        )
+        stem = f"epoch_{epoch:03d}_zoom_{zoom:g}"
+        write_png(str(output_dir / f"{stem}_rgb.png"), rendered.rgb)
+        if config.diffusion.preview.save_offset:
+            write_png(
+                str(output_dir / f"{stem}_offset.png"),
+                rendered.offset,
+                srgb=False,
+            )
+    del source_model
+
+
+def main(argv: Optional[list[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--config",
+        required=True,
+        help="project.json generated by extract_latents.py",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="",
+        help="synthesis root; overrides project config output_dir",
+    )
+    parser.add_argument("--device", default="", help="cpu, cuda, cuda:N, or auto")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace known files in an existing diffusion stage",
+    )
+    args = parser.parse_args(argv)
+
+    config_path = str(Path(args.config).resolve())
+    config = load_synthesis_config(config_path)
+    output_root = resolve_output_root(
+        config,
+        config_path=config_path,
+        override=args.output_dir,
+    )
+    paths = synthesis_stage_paths(output_root, "diffusion")
+    checkpoint_path = paths.artifacts / "model_final.pt"
+    metadata_path = paths.artifacts / "metadata.json"
+    prepare_stage(
+        paths.artifacts,
+        (checkpoint_path, metadata_path),
+        overwrite=args.overwrite,
+    )
+    if config.diffusion.preview.enabled:
+        paths.visualization.mkdir(parents=True, exist_ok=True)
+
+    device = resolve_device(args.device or config.device)
+    artifact = load_latent_artifact(output_root)
+    latent = artifact.load(mmap_mode="r")
+    data_config = config.diffusion.data
+    maximum_read = int(round(data_config.crop_size * data_config.zoom_range[1]))
+    if maximum_read > min(latent.shape[:2]):
+        raise ValueError(
+            f"diffusion crop requires {maximum_read}px but latent is "
+            f"{latent.shape[1]}x{latent.shape[0]}; adjust diffusion.data"
+        )
+
+    seed = int(config.diffusion.seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+        torch.cuda.reset_peak_memory_stats(device)
+
+    print("--- Diffusion training ---")
+    print(f"latent:         {artifact.latent_path}")
+    print(f"output:         {paths.artifacts}")
+    print(f"shape:          {latent.shape}")
+    print(f"crop/batch:     {data_config.crop_size}/{data_config.batch_size}")
+    print(f"zoom range:     {data_config.zoom_range}")
+    print(f"epochs:         {config.diffusion.train.epochs}")
+    print(f"samples/epoch:  {data_config.samples_per_epoch}")
+    print(f"device:         {device}")
+
+    train_dataset = LatentCropDataset(
+        latent,
+        crop_size=data_config.crop_size,
+        samples=data_config.samples_per_epoch,
+        zoom_range=data_config.zoom_range,
+        extremes_probability=data_config.extremes_probability,
+        seed=seed,
+    )
+    validation_dataset = None
+    if data_config.validation_samples:
+        validation_dataset = LatentCropDataset(
+            latent,
+            crop_size=data_config.crop_size,
+            samples=data_config.validation_samples,
+            zoom_range=data_config.zoom_range,
+            extremes_probability=data_config.extremes_probability,
+            seed=seed + 1_000_003,
+            mean=train_dataset.mean,
+            std=train_dataset.std,
+        )
+    del latent
+
+    loader_generator = torch.Generator().manual_seed(seed)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=data_config.batch_size,
+        shuffle=True,
+        generator=loader_generator,
+        num_workers=data_config.workers if device.type == "cuda" else 0,
+        pin_memory=device.type == "cuda",
+        persistent_workers=data_config.workers > 0 and device.type == "cuda",
+        drop_last=True,
+    )
+    validation_loader = None
+    if validation_dataset is not None:
+        validation_loader = DataLoader(
+            validation_dataset,
+            batch_size=data_config.batch_size,
+            shuffle=False,
+            num_workers=data_config.workers if device.type == "cuda" else 0,
+            pin_memory=device.type == "cuda",
+            persistent_workers=data_config.workers > 0 and device.type == "cuda",
+        )
+
+    model = build_unet(
+        artifact.layout.total_channels,
+        config.diffusion.model,
+        device,
+    )
+    parameter_count = sum(value.numel() for value in model.parameters())
+    scheduler = build_training_scheduler(config.diffusion.schedule)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config.diffusion.train.learning_rate,
+        weight_decay=config.diffusion.train.weight_decay,
+    )
+    ema = ExponentialMovingAverage(model, config.diffusion.train.ema_decay)
+
+    resolved = config.as_dict()
+    resolved["output_dir"] = str(output_root)
+    write_json(paths.artifacts / "config.resolved.json", resolved)
+    write_json(
+        paths.artifacts / "normalization.json",
+        {
+            "mean": train_dataset.mean.tolist(),
+            "std": train_dataset.std.tolist(),
+        },
+    )
+
+    history = {
+        "step_loss": [],
+        "epoch_train_loss": [],
+        "epoch_validation_loss": [],
+    }
+    global_step = 0
+    completed_epoch = 0
+    started = time.perf_counter()
+    total_batches = len(train_loader) * config.diffusion.train.epochs
+    if config.diffusion.train.max_steps is not None:
+        total_batches = min(total_batches, config.diffusion.train.max_steps)
+    print(f"parameters:     {parameter_count:,}")
+    print(f"steps planned:  {total_batches}")
+
+    for epoch in range(1, config.diffusion.train.epochs + 1):
+        epoch_started = time.perf_counter()
+        train_loss, step_losses, global_step, stopped = train_epoch(
+            train_loader,
+            train_dataset,
+            model,
+            scheduler,
+            optimizer,
+            ema,
+            config.diffusion,
+            device,
+            epoch=epoch,
+            global_step=global_step,
+        )
+        completed_epoch = epoch
+        history["step_loss"].extend(step_losses)
+        history["epoch_train_loss"].append(train_loss)
+
+        validation_loss = None
+        if validation_loader is not None:
+            validation_loss = evaluate(
+                validation_loader,
+                model,
+                scheduler,
+                config.diffusion,
+                device,
+                seed=seed + 2_000_003,
+            )
+            history["epoch_validation_loss"].append(validation_loss)
+
+        write_json(paths.artifacts / "history.json", history)
+        if config.diffusion.preview.enabled:
+            _save_loss_plot(history, paths.visualization / "training_loss.png")
+
+        elapsed = time.perf_counter() - started
+        epoch_time = time.perf_counter() - epoch_started
+        remaining_epochs = config.diffusion.train.epochs - epoch
+        eta = (elapsed / epoch) * remaining_epochs
+        validation_text = (
+            f" | validation {validation_loss:.6f}"
+            if validation_loss is not None
+            else ""
+        )
+        print(
+            f"[epoch {epoch}/{config.diffusion.train.epochs}] "
+            f"train {train_loss:.6f}{validation_text} | "
+            f"time {format_duration(epoch_time)} | "
+            f"elapsed {format_duration(elapsed)} | "
+            f"eta {format_duration(eta)} | VRAM {cuda_memory(device)}"
+        )
+
+        should_preview = (
+            config.diffusion.preview.enabled
+            and epoch % config.diffusion.preview.every_epochs == 0
+        )
+        if should_preview:
+            _preview_epoch(
+                epoch=epoch,
+                model=model,
+                ema=ema,
+                config=config,
+                artifact=artifact,
+                mean=train_dataset.mean,
+                std=train_dataset.std,
+                device=device,
+                output_dir=paths.visualization,
+            )
+        if stopped:
+            break
+
+    elapsed = time.perf_counter() - started
+    save_checkpoint(
+        checkpoint_path,
+        ema,
+        latent_channels=artifact.layout.total_channels,
+        config=config.diffusion,
+        epoch=completed_epoch,
+        global_step=global_step,
+    )
+    memory_stats = cuda_memory_stats(device)
+    write_json(
+        metadata_path,
+        {
+            "schema_version": 1,
+            "source_latent": str(artifact.latent_path),
+            "source_metadata": str(artifact.metadata_path),
+            "checkpoint": checkpoint_path.name,
+            "normalization": "normalization.json",
+            "history": "history.json",
+            "latent_channels": artifact.layout.total_channels,
+            "parameter_count": parameter_count,
+            "completed_epochs": completed_epoch,
+            "global_steps": global_step,
+            "samples_seen": global_step * data_config.batch_size,
+            "training_seconds": elapsed,
+            "peak_allocated_vram_bytes": memory_stats["peak_allocated_bytes"],
+            "peak_reserved_vram_bytes": memory_stats["peak_reserved_bytes"],
+            "validation_uses_seen_texture": validation_loader is not None,
+        },
+    )
+    print(f"[memory] {cuda_memory(device)}")
+    print(f"[saved] {checkpoint_path}")
+    print(
+        f"[done] {global_step} steps, "
+        f"{global_step * data_config.batch_size} crops, "
+        f"{format_duration(elapsed)}"
+    )
+
+
+if __name__ == "__main__":
+    main()

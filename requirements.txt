@@ -1,0 +1,11 @@
+# Install PyTorch matching your CUDA version first, e.g.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+torch>=2.1
+numpy>=1.24
+h5py>=3.8
+
+# Optional: loss-curve PNGs (`--plot`). Everything else works without it.
+# matplotlib>=3.7
+
+# Optional: the LPIPS column of `evaluate.py --lpips`.
+# lpips>=0.1.4

@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+data/*
+!data/.gitkeep
+results/
+*.pth
+*.exr
+.venv*/
+
+# Internal working log, kept out of the public repo.
+HANDOFF.md
+*.egg-info/
+build/
+dist/

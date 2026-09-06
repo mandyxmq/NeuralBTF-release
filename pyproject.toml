@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neuralbtf"
+version = "1.0.0"
+description = "Neural BTF: multi-resolution neural textures with a view-dependent neural offset"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["torch>=2.1", "numpy>=1.24", "h5py>=3.8"]
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.7"]     # loss curves, `train.py --plot`
+lpips = ["lpips>=0.1.4"]       # the LPIPS column of `evaluate.py --lpips`
+synthesis = [
+    "diffusers>=0.35.2,<0.36",
+    "scipy>=1.10,<2",
+    "matplotlib>=3.7,<4",
+    "Pillow>=10,<13",
+]
+
+# Only the library is installed; `training/` and `synthesis/` are scripts you run
+# from the checkout. `pip install -e .` makes `import neuralbtf` work from anywhere,
+# which is what code outside this repo (a renderer, a notebook) should rely on.
+[tool.setuptools]
+packages = ["neuralbtf", "neuralbtf.synthesis"]
